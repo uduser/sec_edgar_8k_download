@@ -36,6 +36,38 @@ GUI 版已固定使用此模式；CLI 可用：
 python SEC_download.py --cik-file ciks.txt --out downloads --user-agent "Your Name your.email@example.com" --start-date 2001-01-01
 ```
 
+## 「季度/season」批次策略（推薦給大量 CIK）
+
+當 CIK 很多（例如 6000+）時，逐公司查詢容易遇到 **timeout / throttling**。你可以改用 SEC 的 **Quarterly Master Index**（按季度）先列出 2001~現在所有 8-K/8-K/A，再下載目標（更省查詢、更好續跑）。
+
+### 產生目標清單（只寫 manifest，不下載）
+
+```bash
+python SEC_download.py --cik-file ciks.txt --out downloads --user-agent "Your Name your.email@example.com" --start-date 2001-01-01 --source master_index --manifest-only
+```
+
+### 下載（可續跑）
+
+```bash
+python SEC_download.py --cik-file ciks.txt --out downloads --user-agent "Your Name your.email@example.com" --start-date 2001-01-01 --source master_index --reuse-targets-manifest
+```
+
+### 多機切分（例如 3 台）
+
+每台用同一份 CIK 清單，但指定不同 shard（不重疊）：
+
+```bash
+python SEC_download.py --cik-file ciks.txt --out downloads_part1 --user-agent "Your Name your.email@example.com" --start-date 2001-01-01 --source master_index --shard 1/3
+```
+
+```bash
+python SEC_download.py --cik-file ciks.txt --out downloads_part2 --user-agent "Your Name your.email@example.com" --start-date 2001-01-01 --source master_index --shard 2/3
+```
+
+```bash
+python SEC_download.py --cik-file ciks.txt --out downloads_part3 --user-agent "Your Name your.email@example.com" --start-date 2001-01-01 --source master_index --shard 3/3
+```
+
 ## 視窗版（Windows / Tkinter）
 
 直接執行：

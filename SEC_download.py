@@ -16,8 +16,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import gzip
+import hashlib
+import io
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -119,16 +123,22 @@ def sec_get_json(
     url: str,
     *,
     rate_limiter: RateLimiter,
-    max_retries: int = 6,
-    timeout_sec: float = 30.0,
+    max_retries: int = 10,
+    timeout_sec: float = 60.0,
 ) -> dict:
     backoff = 1.0
     for attempt in range(max_retries):
         rate_limiter.wait()
-        resp = session.get(url, timeout=timeout_sec)
+        try:
+            resp = session.get(url, timeout=(10.0, timeout_sec))
+        except requests.exceptions.RequestException:
+            # Network hiccup / timeout: backoff and retry
+            time.sleep(backoff + random.random())
+            backoff = min(backoff * 2, 60.0)
+            continue
         if resp.status_code in (403, 429, 500, 502, 503, 504):
             # Respect SEC throttling; exponential backoff.
-            time.sleep(backoff)
+            time.sleep(backoff + random.random())
             backoff = min(backoff * 2, 60.0)
             continue
         resp.raise_for_status()
@@ -140,15 +150,20 @@ def sec_get_text(
     url: str,
     *,
     rate_limiter: RateLimiter,
-    max_retries: int = 6,
-    timeout_sec: float = 30.0,
+    max_retries: int = 10,
+    timeout_sec: float = 60.0,
 ) -> str:
     backoff = 1.0
     for attempt in range(max_retries):
         rate_limiter.wait()
-        resp = session.get(url, timeout=timeout_sec)
+        try:
+            resp = session.get(url, timeout=(10.0, timeout_sec))
+        except requests.exceptions.RequestException:
+            time.sleep(backoff + random.random())
+            backoff = min(backoff * 2, 60.0)
+            continue
         if resp.status_code in (403, 429, 500, 502, 503, 504):
-            time.sleep(backoff)
+            time.sleep(backoff + random.random())
             backoff = min(backoff * 2, 60.0)
             continue
         resp.raise_for_status()
@@ -157,14 +172,43 @@ def sec_get_text(
     raise RuntimeError(f"Failed to fetch text after retries: {url}")
 
 
+def sec_get_bytes(
+    session: requests.Session,
+    url: str,
+    *,
+    rate_limiter: RateLimiter,
+    max_retries: int = 10,
+    timeout_sec: float = 120.0,
+) -> bytes:
+    """
+    Fetch raw bytes with retries/backoff. Useful for large index files and .gz.
+    """
+    backoff = 1.0
+    for attempt in range(max_retries):
+        rate_limiter.wait()
+        try:
+            resp = session.get(url, timeout=(10.0, timeout_sec))
+        except requests.exceptions.RequestException:
+            time.sleep(backoff + random.random())
+            backoff = min(backoff * 2, 60.0)
+            continue
+        if resp.status_code in (403, 429, 500, 502, 503, 504):
+            time.sleep(backoff + random.random())
+            backoff = min(backoff * 2, 60.0)
+            continue
+        resp.raise_for_status()
+        return resp.content
+    raise RuntimeError(f"Failed to fetch bytes after retries: {url}")
+
+
 def sec_download_file(
     session: requests.Session,
     url: str,
     target_path: Path,
     *,
     rate_limiter: RateLimiter,
-    max_retries: int = 6,
-    timeout_sec: float = 60.0,
+    max_retries: int = 10,
+    timeout_sec: float = 120.0,
 ) -> None:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     if target_path.exists() and target_path.stat().st_size > 0:
@@ -173,9 +217,14 @@ def sec_download_file(
     backoff = 1.0
     for attempt in range(max_retries):
         rate_limiter.wait()
-        resp = session.get(url, timeout=timeout_sec, stream=True)
+        try:
+            resp = session.get(url, timeout=(10.0, timeout_sec), stream=True)
+        except requests.exceptions.RequestException:
+            time.sleep(backoff + random.random())
+            backoff = min(backoff * 2, 60.0)
+            continue
         if resp.status_code in (403, 429, 500, 502, 503, 504):
-            time.sleep(backoff)
+            time.sleep(backoff + random.random())
             backoff = min(backoff * 2, 60.0)
             continue
         resp.raise_for_status()
@@ -219,6 +268,181 @@ def _try_parse_date_yyyy_mm_dd(s: str) -> _dt.date | None:
         return None
 
 
+def _current_year_quarter(today: _dt.date | None = None) -> tuple[int, int]:
+    d = today or _dt.date.today()
+    q = (d.month - 1) // 3 + 1
+    return d.year, int(q)
+
+
+def _iter_year_quarters(start_year: int, end_year: int, end_quarter: int) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    for y in range(int(start_year), int(end_year) + 1):
+        for q in (1, 2, 3, 4):
+            if y == end_year and q > int(end_quarter):
+                break
+            out.append((y, q))
+    return out
+
+
+_MASTER_IDX_ACC_RE = re.compile(r"\b(\d{10}-\d{2}-\d{6})\.txt\b", re.IGNORECASE)
+
+
+def write_targets_manifest(path: Path, targets: list[FilingRef]) -> None:
+    """
+    Write FilingRef list as JSON Lines for resume/sharding.
+    """
+    with open(path, "w", encoding="utf-8") as f:
+        for t in targets:
+            f.write(
+                json.dumps(
+                    {
+                        "cik10": t.cik10,
+                        "accession_no": t.accession_no,
+                        "filing_date": t.filing_date,
+                        "form": t.form,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+
+def read_targets_manifest(path: Path) -> list[FilingRef]:
+    out: list[FilingRef] = []
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            obj = json.loads(ln)
+        except Exception:
+            continue
+        cik10 = normalize_cik(str(obj.get("cik10") or ""))
+        accession_no = str(obj.get("accession_no") or "")
+        filing_date = str(obj.get("filing_date") or "unknown-date")
+        form = str(obj.get("form") or "8-K")
+        if not accession_no:
+            continue
+        out.append(
+            FilingRef(
+                cik10=cik10,
+                accession_no=accession_no,
+                filing_date=filing_date,
+                form=form,
+                primary_document="",
+            )
+        )
+    out.sort(key=lambda x: (x.filing_date, x.accession_no))
+    return out
+
+
+def collect_8k_from_master_index(
+    session: requests.Session,
+    *,
+    cik_filter: set[str] | None,
+    start_year: int = 2001,
+    start_date: str | None,
+    include_amendments: bool,
+    rate_limiter: RateLimiter,
+) -> list[FilingRef]:
+    """
+    Use SEC quarterly master index to list filings in bulk (\"season\"/quarterly mode).
+
+    - Source: https://www.sec.gov/Archives/edgar/full-index/{year}/QTR{q}/master.idx
+      (fallback to master.gz)
+    - Filter: 8-K and optionally 8-K/A
+    - If cik_filter is provided, only keep those CIKs (10-digit form).
+
+    Returns FilingRef list (primary_document empty; download uses filing index HTML).
+    """
+    start_dt = _parse_date_yyyy_mm_dd(start_date) if start_date else None
+    end_year, end_q = _current_year_quarter()
+    quarters = _iter_year_quarters(int(start_year), int(end_year), int(end_q))
+
+    wanted_forms = {"8-K"}
+    if include_amendments:
+        wanted_forms.add("8-K/A")
+
+    out: list[FilingRef] = []
+    for year, qtr in quarters:
+        base = f"{SEC_ARCHIVES_BASE}/edgar/full-index/{year}/QTR{qtr}"
+        # Try plain master.idx first; fallback to master.gz (some environments prefer gz).
+        data: bytes | None = None
+        for name in ("master.idx", "master.gz"):
+            url = f"{base}/{name}"
+            try:
+                data = sec_get_bytes(session, url, rate_limiter=rate_limiter)
+                if name.endswith(".gz"):
+                    data = gzip.decompress(data)
+                break
+            except Exception:
+                data = None
+                continue
+        if not data:
+            continue
+
+        # master.idx is ASCII; decode with replacement to be robust
+        text = data.decode("latin-1", errors="replace")
+        lines = text.splitlines()
+
+        # Skip header until the pipe header line
+        start_i = 0
+        for i, ln in enumerate(lines[:200]):
+            if ln.strip().upper().startswith("CIK|COMPANY NAME|FORM TYPE|DATE FILED|FILENAME"):
+                start_i = i + 1
+                break
+
+        for ln in lines[start_i:]:
+            if not ln or "|" not in ln:
+                continue
+            parts = ln.split("|")
+            if len(parts) < 5:
+                continue
+            cik_raw, _company, form, date_filed, filename = parts[0].strip(), parts[1], parts[2].strip(), parts[3].strip(), parts[4].strip()
+            if form not in wanted_forms:
+                continue
+
+            dt = _try_parse_date_yyyy_mm_dd(date_filed)
+            if not dt:
+                continue
+            if start_dt and dt < start_dt:
+                continue
+
+            try:
+                cik10 = normalize_cik(cik_raw)
+            except Exception:
+                continue
+            if cik_filter and cik10 not in cik_filter:
+                continue
+
+            m = _MASTER_IDX_ACC_RE.search(filename)
+            if not m:
+                continue
+            accession_no = m.group(1)
+
+            out.append(
+                FilingRef(
+                    cik10=cik10,
+                    accession_no=accession_no,
+                    filing_date=date_filed,
+                    form=form,
+                    primary_document="",
+                )
+            )
+
+    # de-dup by accession (master index can contain duplicates across corrections)
+    seen: set[str] = set()
+    deduped: list[FilingRef] = []
+    for r in out:
+        if r.accession_no in seen:
+            continue
+        seen.add(r.accession_no)
+        deduped.append(r)
+    deduped.sort(key=lambda x: (x.filing_date, x.accession_no))
+    return deduped
+
+
 def run_download(
     *,
     ciks: list[str],
@@ -230,6 +454,12 @@ def run_download(
     save_manifest: bool = False,
     download_mode: str = "all",
     start_date: str | None = None,
+    source_mode: str = "cik",
+    master_start_year: int = 2001,
+    shard: str | None = None,
+    targets_manifest: str | Path | None = None,
+    reuse_targets_manifest: bool = False,
+    manifest_only: bool = False,
     log: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """
@@ -253,17 +483,120 @@ def run_download(
 
     if download_mode not in ("8k_ex", "primary_ex_htm", "all"):
         raise ValueError(f"Unknown download_mode: {download_mode}")
+    if source_mode not in ("cik", "master_index"):
+        raise ValueError(f"Unknown source_mode: {source_mode}")
 
     out_dir = Path(out)
     session = build_session(user_agent)
     rate_limiter = RateLimiter(min_interval)
 
-    total_companies = len(ciks10)
-    companies_done = 0
-    companies_failed = 0
     total_targets = 0
     ok = 0
     failed = 0
+
+    # ---- master index mode (season/quarter batch) ----
+    if source_mode == "master_index":
+        manifest_path: Path
+        if targets_manifest:
+            manifest_path = Path(targets_manifest)
+        else:
+            sd = (start_date or "all").replace("/", "-")
+            shard_tag = (shard or "all").replace("/", "_")
+            manifest_path = out_dir / f"master_index_8k_targets_{sd}_{shard_tag}.jsonl"
+
+        if reuse_targets_manifest and manifest_path.exists():
+            _log(f"MASTER_INDEX mode: loading targets from manifest {manifest_path} ...")
+            targets = read_targets_manifest(manifest_path)
+        else:
+            _log("MASTER_INDEX mode: building 8-K targets from quarterly index ...")
+            targets = collect_8k_from_master_index(
+                session,
+                cik_filter=set(ciks10),
+                start_year=int(master_start_year),
+                start_date=start_date,
+                include_amendments=include_amendments,
+                rate_limiter=rate_limiter,
+            )
+        # Optional sharding for multi-machine runs: keep only a slice of accessions.
+        if shard:
+            m = re.match(r"^\s*(\d+)\s*/\s*(\d+)\s*$", shard)
+            if not m:
+                raise ValueError("Invalid --shard format. Use N/K, e.g. 1/3")
+            n = int(m.group(1))
+            k = int(m.group(2))
+            if k <= 0 or n <= 0 or n > k:
+                raise ValueError("Invalid --shard values. Must satisfy 1 <= N <= K and K > 0")
+            before = len(targets)
+            targets = [
+                t
+                for t in targets
+                if (int(hashlib.sha1(t.accession_no.encode("utf-8")).hexdigest(), 16) % k) == (n - 1)
+            ]
+            _log(f"MASTER_INDEX shard={n}/{k} targets={len(targets)}/{before}")
+        # Always write manifest for resume/debugging
+        try:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            write_targets_manifest(manifest_path, targets)
+            _log(f"MASTER_INDEX wrote manifest: {manifest_path}")
+        except Exception as e:
+            _log(f"MASTER_INDEX manifest write failed: {e}")
+
+        total_targets = len(targets)
+        _log(f"MASTER_INDEX targets={total_targets}")
+
+        if manifest_only:
+            _log("MASTER_INDEX manifest-only: skip downloads.")
+            return {
+                "ok": 0,
+                "failed": 0,
+                "total": total_targets,
+                "companies_total": len(ciks10),
+                "companies_done": len(ciks10),
+                "companies_failed": 0,
+                "out": str(out_dir.resolve()),
+            }
+
+        if targets:
+            _log(f"Downloading {len(targets)} filings ...")
+            with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as ex:
+                futs = [
+                    ex.submit(
+                        download_filing,
+                        session,
+                        filing,
+                        out_dir,
+                        rate_limiter=rate_limiter,
+                        save_manifest=bool(save_manifest),
+                        download_mode=download_mode,
+                    )
+                    for filing in targets
+                ]
+                for fut in as_completed(futs):
+                    try:
+                        filing, count = fut.result()
+                        ok += 1
+                        _log(f"OK  {filing.cik10} {filing.filing_date} {filing.accession_no} files={count}")
+                    except Exception as e:
+                        failed += 1
+                        _log(f"FAIL {e}")
+        else:
+            _log("No targets found. Done.")
+
+        _log(f"Done. ok={ok} failed={failed} targets={total_targets} out={out_dir.resolve()}")
+        return {
+            "ok": ok,
+            "failed": failed,
+            "total": total_targets,
+            "companies_total": len(ciks10),
+            "companies_done": len(ciks10),
+            "companies_failed": 0,
+            "out": str(out_dir.resolve()),
+        }
+
+    # ---- per-company mode (existing) ----
+    total_companies = len(ciks10)
+    companies_done = 0
+    companies_failed = 0
 
     for idx, cik10 in enumerate(ciks10, start=1):
         _log(f"[{idx}/{total_companies}] {cik10} SCAN start")
@@ -882,6 +1215,38 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--user-agent", required=True, help='SEC required User-Agent, include email. e.g. "Name email@domain.com"')
     p.add_argument("--include-amendments", action="store_true", help="Also include 8-K/A.")
     p.add_argument("--start-date", default=None, help="Filter filings on/after this date (YYYY-MM-DD or YYYY/MM/DD).")
+    p.add_argument(
+        "--source",
+        default="cik",
+        choices=["cik", "master_index"],
+        help="Target source: per-company (cik) or quarterly master index (master_index).",
+    )
+    p.add_argument(
+        "--master-start-year",
+        type=int,
+        default=2001,
+        help="When --source master_index: first year to scan (default: 2001).",
+    )
+    p.add_argument(
+        "--shard",
+        default=None,
+        help="Optional sharding like '1/3' to split work across machines (implemented for master_index mode).",
+    )
+    p.add_argument(
+        "--targets-manifest",
+        default=None,
+        help="When --source master_index: path to write/read targets manifest (jsonl). Default: under --out.",
+    )
+    p.add_argument(
+        "--reuse-targets-manifest",
+        action="store_true",
+        help="When --source master_index: reuse existing --targets-manifest instead of rescanning quarterly index.",
+    )
+    p.add_argument(
+        "--manifest-only",
+        action="store_true",
+        help="When --source master_index: build targets + write manifest, then exit without downloading.",
+    )
     p.add_argument("--min-interval", type=float, default=0.2, help="Minimum seconds between SEC requests (global).")
     p.add_argument("--max-workers", type=int, default=3, help="Parallel download workers across filings.")
     p.add_argument("--save-manifest", action="store_true", help="Write manifest.json per filing folder.")
@@ -906,6 +1271,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         user_agent=args.user_agent,
         include_amendments=bool(args.include_amendments),
         start_date=args.start_date,
+        source_mode=args.source,
+        master_start_year=int(args.master_start_year),
+        shard=args.shard,
+        targets_manifest=args.targets_manifest,
+        reuse_targets_manifest=bool(args.reuse_targets_manifest),
+        manifest_only=bool(args.manifest_only),
         min_interval=float(args.min_interval),
         max_workers=int(args.max_workers),
         save_manifest=bool(args.save_manifest),
