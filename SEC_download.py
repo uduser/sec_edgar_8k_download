@@ -227,6 +227,10 @@ def sec_download_file(
             time.sleep(backoff + random.random())
             backoff = min(backoff * 2, 60.0)
             continue
+        # Some older accession directories have index listings that reference missing files.
+        # Treat 404 as a skip so one missing file doesn't fail the whole filing.
+        if resp.status_code == 404:
+            return
         resp.raise_for_status()
 
         tmp_path = target_path.with_suffix(target_path.suffix + ".part")
@@ -605,7 +609,7 @@ def run_download(
         # - Fall back to browse-edgar when submissions appears too shallow (some issuers miss older years there).
         if start_date:
             start_dt = _parse_date_yyyy_mm_dd(start_date)
-            filings = collect_all_filings_for_cik(session, cik10, rate_limiter=rate_limiter)
+        filings = collect_all_filings_for_cik(session, cik10, rate_limiter=rate_limiter)
             sub_targets = filter_8k_filings(cik10, filings, include_amendments=include_amendments)
             sub_targets = [t for t in sub_targets if (_try_parse_date_yyyy_mm_dd(t.filing_date) or _dt.date.max) >= start_dt]
             sub_earliest = min(
@@ -937,9 +941,9 @@ class _EdgarIndexParser(HTMLParser):
             type_idx = self._type_col_idx
             if doc_idx is None or type_idx is None:
                 # Fallback to the old assumption (best-effort)
-                if len(self._cells) >= 3:
-                    doc = self._cells[0].strip()
-                    typ = self._cells[2].strip()
+            if len(self._cells) >= 3:
+                doc = self._cells[0].strip()
+                typ = self._cells[2].strip()
                 else:
                     return
             else:
@@ -949,7 +953,7 @@ class _EdgarIndexParser(HTMLParser):
                 typ = self._cells[type_idx].strip()
 
             if doc and doc.lower() != "document":
-                self.rows.append((doc, typ))
+                    self.rows.append((doc, typ))
         if tag in ("td", "th") and self._in_cell:
             self._in_cell = False
             self._cells.append(re.sub(r"\s+", " ", self._cell_text).strip())
@@ -1216,6 +1220,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--include-amendments", action="store_true", help="Also include 8-K/A.")
     p.add_argument("--start-date", default=None, help="Filter filings on/after this date (YYYY-MM-DD or YYYY/MM/DD).")
     p.add_argument(
+        "--download-mode",
+        default="primary_ex_htm",
+        choices=["primary_ex_htm", "8k_ex", "all"],
+        help="Which files to download per filing. Default: primary_ex_htm (primary + EX-* and only .htm).",
+    )
+    p.add_argument(
         "--source",
         default="cik",
         choices=["cik", "master_index"],
@@ -1280,6 +1290,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         min_interval=float(args.min_interval),
         max_workers=int(args.max_workers),
         save_manifest=bool(args.save_manifest),
+        download_mode=str(args.download_mode),
     )
     return 0 if summary.get("failed", 0) == 0 else 2
 
