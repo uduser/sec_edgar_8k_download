@@ -609,9 +609,13 @@ def run_download(
         # - Fall back to browse-edgar when submissions appears too shallow (some issuers miss older years there).
         if start_date:
             start_dt = _parse_date_yyyy_mm_dd(start_date)
-        filings = collect_all_filings_for_cik(session, cik10, rate_limiter=rate_limiter)
+            filings = collect_all_filings_for_cik(session, cik10, rate_limiter=rate_limiter)
             sub_targets = filter_8k_filings(cik10, filings, include_amendments=include_amendments)
-            sub_targets = [t for t in sub_targets if (_try_parse_date_yyyy_mm_dd(t.filing_date) or _dt.date.max) >= start_dt]
+            sub_targets = [
+                t
+                for t in sub_targets
+                if (_try_parse_date_yyyy_mm_dd(t.filing_date) or _dt.date.max) >= start_dt
+            ]
             sub_earliest = min(
                 (d for d in (_try_parse_date_yyyy_mm_dd(t.filing_date) for t in sub_targets) if d),
                 default=None,
@@ -941,9 +945,9 @@ class _EdgarIndexParser(HTMLParser):
             type_idx = self._type_col_idx
             if doc_idx is None or type_idx is None:
                 # Fallback to the old assumption (best-effort)
-            if len(self._cells) >= 3:
-                doc = self._cells[0].strip()
-                typ = self._cells[2].strip()
+                if len(self._cells) >= 3:
+                    doc = self._cells[0].strip()
+                    typ = self._cells[2].strip()
                 else:
                     return
             else:
@@ -953,7 +957,7 @@ class _EdgarIndexParser(HTMLParser):
                 typ = self._cells[type_idx].strip()
 
             if doc and doc.lower() != "document":
-                    self.rows.append((doc, typ))
+                self.rows.append((doc, typ))
         if tag in ("td", "th") and self._in_cell:
             self._in_cell = False
             self._cells.append(re.sub(r"\s+", " ", self._cell_text).strip())
