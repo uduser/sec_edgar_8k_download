@@ -609,7 +609,7 @@ def run_download(
         # - Fall back to browse-edgar when submissions appears too shallow (some issuers miss older years there).
         if start_date:
             start_dt = _parse_date_yyyy_mm_dd(start_date)
-            filings = collect_all_filings_for_cik(session, cik10, rate_limiter=rate_limiter)
+        filings = collect_all_filings_for_cik(session, cik10, rate_limiter=rate_limiter)
             sub_targets = filter_8k_filings(cik10, filings, include_amendments=include_amendments)
             sub_targets = [t for t in sub_targets if (_try_parse_date_yyyy_mm_dd(t.filing_date) or _dt.date.max) >= start_dt]
             sub_earliest = min(
