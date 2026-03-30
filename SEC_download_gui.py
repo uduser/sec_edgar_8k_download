@@ -26,7 +26,7 @@ def _split_ciks_text(text: str) -> list[str]:
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("SEC EDGAR 8-K Downloader")
+        self.title("SEC EDGAR 10-K Downloader")
         self.geometry("900x700")
 
         self._running = False
@@ -76,7 +76,7 @@ class App(tk.Tk):
         self.include_amend_var = tk.BooleanVar(value=True)
         # GUI 固定使用「只抓主文件(primary) + EX-*，且只保留 .htm」模式；manifest 在此模式下不會寫出
         self.save_manifest_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opt_frame, text="包含 8-K/A", variable=self.include_amend_var).pack(anchor="w", padx=8, pady=(6, 0))
+        ttk.Checkbutton(opt_frame, text="包含 10-K/A", variable=self.include_amend_var).pack(anchor="w", padx=8, pady=(6, 0))
         mcb = ttk.Checkbutton(opt_frame, text="每筆存 manifest.json（此模式不輸出）", variable=self.save_manifest_var)
         mcb.pack(anchor="w", padx=8, pady=(0, 6))
         mcb.state(["disabled"])

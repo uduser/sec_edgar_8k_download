@@ -1,14 +1,14 @@
 """
-SEC EDGAR Form 8-K downloader
+SEC EDGAR Form 10-K downloader
 
 需求摘要（對應使用者描述）：
 - 依公司清單（CIK）查詢該公司所有 filings
-- 篩選 Form 8-K（時間 All；可選含 8-K/A）
-- 下載每筆 8-K 的主文件與附件（同一 accession 目錄下全部檔案）
+- 篩選 Form 10-K（時間 All；可選含 10-K/A）
+- 下載每筆 10-K 的主文件與附件（同一 accession 目錄下全部檔案）
 
 資料來源（SEC 官方）：
 - 公司提交資料總表（較新資料；部分公司可能不含很早期 filings）：https://data.sec.gov/submissions/CIK##########.json
-- 公司 filings 列表（可回溯較早期）：https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=##########&type=8-K
+- 公司 filings 列表（可回溯較早期）：https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=##########&type=10-K
 - Filing 目錄索引：https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodashes}/index.json
 """
 
@@ -325,7 +325,7 @@ def read_targets_manifest(path: Path) -> list[FilingRef]:
         cik10 = normalize_cik(str(obj.get("cik10") or ""))
         accession_no = str(obj.get("accession_no") or "")
         filing_date = str(obj.get("filing_date") or "unknown-date")
-        form = str(obj.get("form") or "8-K")
+        form = str(obj.get("form") or "10-K")
         if not accession_no:
             continue
         out.append(
@@ -341,7 +341,7 @@ def read_targets_manifest(path: Path) -> list[FilingRef]:
     return out
 
 
-def collect_8k_from_master_index(
+def collect_10k_from_master_index(
     session: requests.Session,
     *,
     cik_filter: set[str] | None,
@@ -355,7 +355,7 @@ def collect_8k_from_master_index(
 
     - Source: https://www.sec.gov/Archives/edgar/full-index/{year}/QTR{q}/master.idx
       (fallback to master.gz)
-    - Filter: 8-K and optionally 8-K/A
+    - Filter: 10-K and optionally 10-K/A
     - If cik_filter is provided, only keep those CIKs (10-digit form).
 
     Returns FilingRef list (primary_document empty; download uses filing index HTML).
@@ -364,9 +364,9 @@ def collect_8k_from_master_index(
     end_year, end_q = _current_year_quarter()
     quarters = _iter_year_quarters(int(start_year), int(end_year), int(end_q))
 
-    wanted_forms = {"8-K"}
+    wanted_forms = {"10-K"}
     if include_amendments:
-        wanted_forms.add("8-K/A")
+        wanted_forms.add("10-K/A")
 
     out: list[FilingRef] = []
     for year, qtr in quarters:
@@ -469,7 +469,7 @@ def run_download(
     """
     Run the full pipeline:
     - fetch all filings for each CIK
-    - filter 8-K (and optionally 8-K/A)
+    - filter 10-K (and optionally 10-K/A)
     - download all files in each filing's accession directory
 
     Returns a summary dict.
@@ -506,14 +506,14 @@ def run_download(
         else:
             sd = (start_date or "all").replace("/", "-")
             shard_tag = (shard or "all").replace("/", "_")
-            manifest_path = out_dir / f"master_index_8k_targets_{sd}_{shard_tag}.jsonl"
+            manifest_path = out_dir / f"master_index_10k_targets_{sd}_{shard_tag}.jsonl"
 
         if reuse_targets_manifest and manifest_path.exists():
             _log(f"MASTER_INDEX mode: loading targets from manifest {manifest_path} ...")
             targets = read_targets_manifest(manifest_path)
         else:
-            _log("MASTER_INDEX mode: building 8-K targets from quarterly index ...")
-            targets = collect_8k_from_master_index(
+            _log("MASTER_INDEX mode: building 10-K targets from quarterly index ...")
+            targets = collect_10k_from_master_index(
                 session,
                 cik_filter=set(ciks10),
                 start_year=int(master_start_year),
@@ -610,7 +610,7 @@ def run_download(
         if start_date:
             start_dt = _parse_date_yyyy_mm_dd(start_date)
             filings = collect_all_filings_for_cik(session, cik10, rate_limiter=rate_limiter)
-            sub_targets = filter_8k_filings(cik10, filings, include_amendments=include_amendments)
+            sub_targets = filter_10k_filings(cik10, filings, include_amendments=include_amendments)
             sub_targets = [
                 t
                 for t in sub_targets
@@ -624,7 +624,7 @@ def run_download(
                 targets = sub_targets
                 _log(f"[{idx}/{total_companies}] {cik10} source=submissions earliest={sub_earliest.isoformat()}")
             else:
-                targets = collect_8k_targets_for_cik(
+                targets = collect_10k_targets_for_cik(
                     session,
                     cik10,
                     include_amendments=include_amendments,
@@ -634,7 +634,7 @@ def run_download(
                 _log(f"[{idx}/{total_companies}] {cik10} source=browse-edgar")
         else:
             # Full history mode
-            targets = collect_8k_targets_for_cik(
+            targets = collect_10k_targets_for_cik(
                 session,
                 cik10,
                 include_amendments=include_amendments,
@@ -642,7 +642,7 @@ def run_download(
                 start_date=None,
             )
         total_targets += len(targets)
-        _log(f"[{idx}/{total_companies}] {cik10} 8-K targets={len(targets)}")
+        _log(f"[{idx}/{total_companies}] {cik10} 10-K targets={len(targets)}")
 
         cik_ok = 0
         cik_failed = 0
@@ -673,7 +673,7 @@ def run_download(
                         cik_failed += 1
                         _log(f"FAIL {e}")
         else:
-            _log(f"[{idx}/{total_companies}] {cik10} no 8-K targets, skip download")
+            _log(f"[{idx}/{total_companies}] {cik10} no 10-K targets, skip download")
 
         companies_done += 1
         if cik_failed > 0:
@@ -753,7 +753,7 @@ def collect_all_filings_for_cik(
     return filings
 
 
-def filter_8k_filings(
+def filter_10k_filings(
     cik10: str,
     filings: list[dict],
     *,
@@ -764,7 +764,7 @@ def filter_8k_filings(
         form = (f.get("form") or "").strip()
         if not form:
             continue
-        if form == "8-K" or (include_amendments and form == "8-K/A"):
+        if form == "10-K" or (include_amendments and form == "10-K/A"):
             acc = f.get("accessionNumber")
             filing_date = f.get("filingDate") or "unknown-date"
             primary = f.get("primaryDocument") or ""
@@ -792,7 +792,7 @@ def filter_8k_filings(
     return deduped
 
 
-def collect_8k_targets_for_cik(
+def collect_10k_targets_for_cik(
     session: requests.Session,
     cik10: str,
     *,
@@ -802,16 +802,16 @@ def collect_8k_targets_for_cik(
     start_date: str | None = None,
 ) -> list[FilingRef]:
     """
-    Collect all 8-K (and optionally 8-K/A) filings for a company across the full available history.
+    Collect all 10-K (and optionally 10-K/A) filings for a company across the full available history.
 
     We use SEC browse-edgar (getcompany) because some companies' submissions JSON may not include
     very old filings. Returned FilingRef may have empty primary_document; download modes that need
     the primary will fall back to the filing index HTML.
     """
     cik_int = cik_to_int_str(cik10)
-    forms = ["8-K"]
+    forms = ["10-K"]
     if include_amendments:
-        forms.append("8-K/A")
+        forms.append("10-K/A")
 
     start_dt: _dt.date | None = _parse_date_yyyy_mm_dd(start_date) if start_date else None
 
@@ -972,7 +972,7 @@ class _CompanyFilingsParser(HTMLParser):
     Parse SEC browse-edgar company filings page (HTML) to extract (form, filing_date, accession_no).
 
     We look for the table with class 'tableFile2'. For each row, extract:
-    - form type (e.g. 8-K / 8-K/A) from first cell text
+    - form type (e.g. 10-K / 10-K/A) from first cell text
     - filing date (YYYY-MM-DD) from any cell
     - accession number from a link that contains "{accession}-index.html"
     """
@@ -1083,11 +1083,11 @@ def _list_primary_ex_htm_files(
         wanted.append(primary)
     else:
         # Older filings may not have primaryDocument from submissions JSON.
-        # Fall back to the filing index table row whose Type is 8-K/8-K/A, and keep only .htm.
+        # Fall back to the filing index table row whose Type is 10-K/10-K/A, and keep only .htm.
         for doc, typ in parser.rows:
             doc = safe_filename(doc)
             t = (typ or "").strip().upper()
-            if t in ("8-K", "8-K/A") and doc.lower().endswith(".htm"):
+            if t in ("10-K", "10-K/A") and doc.lower().endswith(".htm"):
                 wanted.append(doc)
                 break
 
@@ -1108,7 +1108,7 @@ def _list_primary_ex_htm_files(
     return out
 
 
-def _list_8k_ex_files(
+def _list_10k_ex_files(
     session: requests.Session,
     filing: FilingRef,
     *,
@@ -1116,7 +1116,7 @@ def _list_8k_ex_files(
 ) -> list[str]:
     """
     Return filenames to download for GUI:
-    - rows in filing index table whose Type is 8-K / 8-K/A
+    - rows in filing index table whose Type is 10-K / 10-K/A
     - rows whose Type starts with EX- (all exhibits)
     No extension restriction.
     """
@@ -1138,7 +1138,7 @@ def _list_8k_ex_files(
         t = (typ or "").strip().upper()
         if not doc:
             continue
-        if t in ("8-K", "8-K/A") or t.startswith("EX-"):
+        if t in ("10-K", "10-K/A") or t.startswith("EX-"):
             wanted.append(doc)
 
     seen: set[str] = set()
@@ -1187,7 +1187,7 @@ def download_filing(
 
     downloaded = 0
     if download_mode == "8k_ex":
-        names = _list_8k_ex_files(session, filing, rate_limiter=rate_limiter)
+        names = _list_10k_ex_files(session, filing, rate_limiter=rate_limiter)
         for name in names:
             url = f"{base_url}/{name}"
             target = base_dir / name
@@ -1216,12 +1216,12 @@ def download_filing(
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Download SEC EDGAR Form 8-K filings (primary + all attachments).")
+    p = argparse.ArgumentParser(description="Download SEC EDGAR Form 10-K filings (primary + all attachments).")
     p.add_argument("--ciks", nargs="*", default=None, help="CIK list (e.g. 0000320193 0001652044).")
     p.add_argument("--cik-file", default=None, help="Text file containing CIKs (comma/space/newline separated).")
     p.add_argument("--out", default="downloads", help="Output directory.")
     p.add_argument("--user-agent", required=True, help='SEC required User-Agent, include email. e.g. "Name email@domain.com"')
-    p.add_argument("--include-amendments", action="store_true", help="Also include 8-K/A.")
+    p.add_argument("--include-amendments", action="store_true", help="Also include 10-K/A.")
     p.add_argument("--start-date", default=None, help="Filter filings on/after this date (YYYY-MM-DD or YYYY/MM/DD).")
     p.add_argument(
         "--download-mode",
